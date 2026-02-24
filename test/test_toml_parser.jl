@@ -1,3 +1,5 @@
+
+
 @testitem "Tokenizer" begin
     tokens = tokenize("""key = "value"\n""")
     kinds = [t.kind for t in tokens]
@@ -149,6 +151,8 @@ end
 end
 
 @testitem "Green tree structure" begin
+    using TomlSyntax: K_TOPLEVEL, K_STD_TABLE, K_KEYVAL, kind
+    
     green = parse_toml_green("[server]\nhost = \"localhost\"")
     @test green.kind == K_TOPLEVEL
     @test green.children !== nothing
@@ -157,8 +161,8 @@ end
     # SyntaxNode API
     root = SyntaxNode(green, 1, "[server]\nhost = \"localhost\"")
     ntc = TomlSyntax.nontrivia_children(root)
-    @test any(c -> kind(c) == K_STD_TABLE, ntc)
-    @test any(c -> kind(c) == K_KEYVAL, ntc)
+    @test any(c -> kind(c) == TomlSyntax.K_STD_TABLE, ntc)
+    @test any(c -> kind(c) == TomlSyntax.K_KEYVAL, ntc)
 end
 
 @testitem "Comments preserved in green tree" begin
@@ -166,7 +170,7 @@ end
     green = parse_toml_green(src)
     root = SyntaxNode(green, 1, src)
     all_children = TomlSyntax.children(root)
-    @test any(c -> kind(c) == K_COMMENT, all_children)
+    @test any(c -> TomlSyntax.kind(c) == TomlSyntax.K_COMMENT, all_children)
 end
 
 @testitem "Lossless round-trip" begin
