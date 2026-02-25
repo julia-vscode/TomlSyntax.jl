@@ -459,6 +459,7 @@ end
 
 is_leaf(n::GreenNode) = n.children === nothing
 Base.length(n::GreenNode) = n.span
+kind(n::GreenNode) = n.kind
 
 function Base.show(io::IO, n::GreenNode)
     if is_leaf(n)
@@ -538,6 +539,36 @@ function expect!(ps::ParseState, kind::TOMLKind, nodes::Vector{GreenNode})
     end
 end
 
+"""
+Skip tokens up to (but not including) the next newline or EOF,
+collecting all skipped tokens as children of a K_ERROR interior node.
+Returns a zero-width K_ERROR leaf if nothing was skipped.
+"""
+function skip_to_eol!(ps::ParseState)::GreenNode
+    nodes = GreenNode[]
+    while !at_eof(ps) && peek_kind(ps) != K_NEWLINE
+        push!(nodes, bump!(ps))
+    end
+    isempty(nodes) && return GreenNode(K_ERROR, 0, nothing)
+    total_span = sum(n.span for n in nodes; init=0)
+    GreenNode(K_ERROR, total_span, nodes)
+end
+
+"""
+Skip tokens until one of the given stop kinds is reached (or EOF),
+collecting all skipped tokens as children of a K_ERROR interior node.
+Returns a zero-width K_ERROR leaf if nothing was skipped.
+"""
+function skip_until!(ps::ParseState, stop_kinds::NTuple)::GreenNode
+    nodes = GreenNode[]
+    while !at_eof(ps) && !(peek_kind(ps) in stop_kinds)
+        push!(nodes, bump!(ps))
+    end
+    isempty(nodes) && return GreenNode(K_ERROR, 0, nothing)
+    total_span = sum(n.span for n in nodes; init=0)
+    GreenNode(K_ERROR, total_span, nodes)
+end
+
 # ── Top-level parser ──
 
 """
@@ -560,8 +591,9 @@ function parse_toml_green(source::AbstractString)::GreenNode
         elseif is_key_kind(k)
             push!(children, parse_keyval!(ps))
         else
-            # Unexpected token — consume as error
-            push!(children, bump!(ps))
+            # Unexpected token — skip to end of line, wrapping all skipped
+            # tokens (including this one) in a single K_ERROR interior node.
+            push!(children, skip_to_eol!(ps))
         end
     end
 
@@ -650,9 +682,16 @@ function parse_keyval!(ps::ParseState)::GreenNode
     children = GreenNode[]
     push!(children, parse_key!(ps))
     collect_trivia!(ps, children)
-    expect!(ps, K_EQ, children)
-    collect_trivia!(ps, children)
-    push!(children, parse_value!(ps))
+    if peek_kind(ps) == K_EQ
+        push!(children, bump!(ps))  # =
+        collect_trivia!(ps, children)
+        push!(children, parse_value!(ps))
+    else
+        # Missing '=': insert a zero-width error sentinel.
+        # Recovery is left to the caller (top-level skips to EOL via its own
+        # else branch; parse_inline_table! uses skip_until! as a guard).
+        push!(children, GreenNode(K_ERROR, 0, nothing))
+    end
     total_span = sum(n.span for n in children; init=0)
     GreenNode(K_KEYVAL, total_span, children)
 end
@@ -663,11 +702,16 @@ function parse_value!(ps::ParseState)::GreenNode
        k == K_ML_BASIC_STRING || k == K_ML_LITERAL_STRING ||
        k == K_INTEGER || k == K_FLOAT || k == K_BOOL || k == K_DATETIME
         return bump!(ps)
+    elseif k == K_ERROR
+        # Tokenizer-level error (e.g. unterminated string): consume the token
+        # so it becomes the error value node rather than leaking into the stream.
+        return bump!(ps)
     elseif k == K_LBRACKET
         return parse_array!(ps)
     elseif k == K_LBRACE
         return parse_inline_table!(ps)
     else
+        # Missing value: return a zero-width error without consuming anything.
         return GreenNode(K_ERROR, 0, nothing)
     end
 end
@@ -679,8 +723,16 @@ function parse_array!(ps::ParseState)::GreenNode
 
     # Values separated by commas; trailing comma allowed
     while !at_eof(ps) && peek_kind(ps) != K_RBRACKET
+        prev_pos = ps.pos
         push!(children, parse_value!(ps))
         collect_trivia!(ps, children)
+        if ps.pos == prev_pos
+            # parse_value! made no progress (unexpected token that is not a
+            # valid value and not a K_ERROR from the tokenizer).  Skip ahead
+            # to the next separator or close bracket so we don't stall.
+            push!(children, skip_until!(ps, (K_COMMA, K_RBRACKET, K_NEWLINE)))
+            collect_trivia!(ps, children)
+        end
         if peek_kind(ps) == K_COMMA
             push!(children, bump!(ps))  # ,
             collect_trivia!(ps, children)
@@ -706,8 +758,16 @@ function parse_inline_table!(ps::ParseState)::GreenNode
             collect_trivia!(ps, children)
         end
         first = false
+        prev_pos = ps.pos
         push!(children, parse_keyval!(ps))
         collect_trivia!(ps, children)
+        # Guard against infinite loop: if parse_keyval! made no progress
+        # (e.g. current token is not a key kind and not at end-of-line),
+        # skip ahead to the next logical separator to avoid stalling.
+        if ps.pos == prev_pos
+            push!(children, skip_until!(ps, (K_COMMA, K_RBRACE, K_NEWLINE)))
+            collect_trivia!(ps, children)
+        end
     end
 
     expect!(ps, K_RBRACE, children)
@@ -815,7 +875,8 @@ function convert_array(n::SyntaxNode)
         k = kind(child)
         k == K_LBRACKET && continue
         k == K_RBRACKET && continue
-        k == K_COMMA && continue
+        k == K_COMMA    && continue
+        k == K_ERROR    && continue  # skip error recovery nodes
         push!(result, node_value(child))
     end
     return result
@@ -825,9 +886,10 @@ function convert_inline_table(n::SyntaxNode)
     result = Dict{String,Any}()
     for child in nontrivia_children(n)
         k = kind(child)
-        k == K_LBRACE && continue
-        k == K_RBRACE && continue
-        k == K_COMMA && continue
+        k == K_LBRACE  && continue
+        k == K_RBRACE  && continue
+        k == K_COMMA   && continue
+        k == K_ERROR   && continue  # skip error recovery nodes
         if k == K_KEYVAL
             set_keyval!(result, child)
         end
@@ -859,14 +921,17 @@ end
 
 function set_keyval!(table::Dict{String,Any}, kv_node::SyntaxNode)
     ntc = nontrivia_children(kv_node)
-    # Find key and value nodes (skip K_EQ)
+    # Find key and value nodes (skip K_EQ and K_ERROR)
     key_node = nothing
     val_node = nothing
     for child in ntc
         k = kind(child)
         if k == K_KEY
             key_node = child
-        elseif k != K_EQ && key_node !== nothing
+        elseif k == K_EQ || k == K_ERROR
+            # skip separator and any error recovery nodes
+            continue
+        elseif key_node !== nothing
             val_node = child
             break
         end
@@ -877,6 +942,8 @@ function set_keyval!(table::Dict{String,Any}, kv_node::SyntaxNode)
     end
 
     parts = key_parts(key_node)
+    isempty(parts) && return  # key parsing entirely failed; nothing to set
+
     value = node_value(val_node)
 
     # Navigate / create intermediate tables for dotted keys

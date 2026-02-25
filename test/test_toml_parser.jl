@@ -179,3 +179,80 @@ end
     @test green.span == length(src)
     # The total span equals the source length → lossless
 end
+
+# ── Error recovery tests ─────────────────────────────────────────────────────
+
+@testitem "Error recovery: invalid token at top level" begin
+    using TomlSyntax: K_ERROR, kind, parse_toml_green
+    # '@' is not valid TOML; the parser should skip it and continue
+    src = "@bad\nkey = 1\n"
+    green = parse_toml_green(src)
+    # Lossless: total span equals source length
+    @test green.span == length(src)
+    # The K_ERROR node should be present somewhere in the top-level children
+    @test any(c -> kind(c) == K_ERROR, green.children)
+    # Valid content after the error line is still parseable
+    d = parsetoml(src)
+    @test d["key"] == 1
+end
+
+@testitem "Error recovery: missing equals sign" begin
+    # A key with no '=' should emit an error and not swallow the next statement
+    src = "missing_eq\nvalid = 42\n"
+    green = parse_toml_green(src)
+    @test green.span == length(src)
+    d = parsetoml(src)
+    @test d["valid"] == 42
+end
+
+@testitem "Error recovery: invalid value (unterminated string)" begin
+    # An unterminated basic string emits a K_ERROR token from the tokenizer.
+    # The parser should absorb it, record the error, and keep going.
+    src = "bad = \"unterminated\nok = 7\n"
+    green = parse_toml_green(src)
+    @test green.span == length(src)
+    d = parsetoml(src)
+    @test d["ok"] == 7
+    # "bad" key has an error value and must not appear in the parsed dict
+    @test !haskey(d, "bad")
+end
+
+@testitem "Error recovery: array with invalid element" begin
+    # An unquoted bare-key-like token is not a valid array value.
+    # The parser should skip it and still collect the surrounding valid elements.
+    src = "arr = [1, not_a_value = 99, 3]\n"
+    d = parsetoml(src)
+    @test d["arr"] == [1, 3]
+end
+
+@testitem "Error recovery: inline table with missing equals" begin
+    # Inline table where one entry is missing '='.
+    # The parser must not hang, and should produce a valid (partial) result.
+    src = "point = {bad}\nnext = 5\n"
+    green = parse_toml_green(src)
+    @test green.span == length(src)
+    d = parsetoml(src)
+    # The error entry is dropped; point becomes an empty table (or absent),
+    # but either way we must not throw and next must be parsed.
+    @test d["next"] == 5
+end
+
+@testitem "Error recovery: multiple errors, lossless" begin
+    # Multiple bad lines interspersed with valid ones.
+    src = "@first_err\nk1 = 1\n!!!\nk2 = 2\n"
+    green = parse_toml_green(src)
+    @test green.span == length(src)
+    d = parsetoml(src)
+    @test d["k1"] == 1
+    @test d["k2"] == 2
+end
+
+@testitem "Error recovery: green tree K_ERROR interior node has correct span" begin
+    using TomlSyntax: K_ERROR, K_TOPLEVEL, kind, parse_toml_green
+    # The error node wrapping "@bad" should have span == length("@bad")
+    src = "@bad\nkey = 1\n"
+    green = parse_toml_green(src)
+    err_nodes = filter(c -> kind(c) == K_ERROR, green.children)
+    @test !isempty(err_nodes)
+    @test err_nodes[1].span == length("@bad")
+end
