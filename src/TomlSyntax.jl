@@ -80,7 +80,7 @@ is_string(k::TOMLKind) = k in (K_BASIC_STRING, K_LITERAL_STRING,
                                 K_ML_BASIC_STRING, K_ML_LITERAL_STRING)
 
 """True if kind can appear as part of a key."""
-is_key_kind(k::TOMLKind) = k == K_BARE_KEY || k == K_BASIC_STRING || k == K_LITERAL_STRING
+is_key_kind(k::TOMLKind) = k == K_BARE_KEY || k == K_INTEGER || k == K_BASIC_STRING || k == K_LITERAL_STRING
 
 # ══════════════════════════════════════════════════════════════════════════════
 # §2  RawToken — the output of the Tokenizer
@@ -838,17 +838,25 @@ function node_value(n::SyntaxNode)
     text = sourcetext(n)
 
     if k == K_BASIC_STRING
-        return unescape_basic_string(text[2:end-1])
+        inner = SubString(text, nextind(text, 1), prevind(text, ncodeunits(text)))
+        return unescape_basic_string(String(inner))
     elseif k == K_LITERAL_STRING
-        return text[2:end-1]
+        inner = SubString(text, nextind(text, 1), prevind(text, ncodeunits(text)))
+        return String(inner)
     elseif k == K_ML_BASIC_STRING
-        s = text[4:end-3]
+        # For multiline strings ("""), convert to string first then use proper string indexing
+        s = String(text)
+        # Skip the first """ and last """ - using string character indexing which handles UTF-8
+        s = s[4:end-3]
         # Strip leading newline per TOML spec
         if startswith(s, "\n"); s = s[2:end]
         elseif startswith(s, "\r\n"); s = s[3:end]; end
         return unescape_basic_string(s)
     elseif k == K_ML_LITERAL_STRING
-        s = text[4:end-3]
+        # For multiline literal strings ('''), convert to string first then use proper string indexing
+        s = String(text)
+        # Skip the first ''' and last ''' - using string character indexing which handles UTF-8
+        s = s[4:end-3]
         if startswith(s, "\n"); s = s[2:end]
         elseif startswith(s, "\r\n"); s = s[3:end]; end
         return s
@@ -905,12 +913,19 @@ function key_parts(n::SyntaxNode)::Vector{String}
         k == K_DOT && continue
         if k == K_BARE_KEY
             push!(parts, sourcetext(child))
+        elseif k == K_INTEGER
+            # Numeric bare keys like 1234 should be treated as string keys
+            push!(parts, sourcetext(child))
         elseif k == K_BASIC_STRING
             text = sourcetext(child)
-            push!(parts, unescape_basic_string(text[2:end-1]))
+            # Use proper Unicode-safe substring extraction: remove first and last character
+            inner = SubString(text, nextind(text, 1), prevind(text, ncodeunits(text)))
+            push!(parts, unescape_basic_string(String(inner)))
         elseif k == K_LITERAL_STRING
             text = sourcetext(child)
-            push!(parts, text[2:end-1])
+            # Use proper Unicode-safe substring extraction: remove first and last character
+            inner = SubString(text, nextind(text, 1), prevind(text, ncodeunits(text)))
+            push!(parts, String(inner))
         elseif k == K_KEY
             # Nested K_KEY (shouldn't normally happen but handle gracefully)
             append!(parts, key_parts(child))
@@ -1054,12 +1069,29 @@ function parse_toml_datetime(s::AbstractString)
         return Date(s)
     end
 
-    # Local time: 07:32:00
+    # Local time: 07:32:00 or 07:32:00.999
     if occursin(':', s)
-        return Time(s)
+        return _parse_time(s)
     end
 
     return s  # fallback
+end
+
+function _parse_time(s::AbstractString)
+    # Handle fractional seconds
+    if occursin('.', s)
+        m = match(r"(\d{2}):(\d{2}):(\d{2})\.(\d+)", s)
+        if m !== nothing
+            hour = parse(Int, m.captures[1])
+            minute = parse(Int, m.captures[2])
+            second = parse(Int, m.captures[3])
+            frac = m.captures[4]
+            # Convert fractional part to milliseconds
+            ms = parse(Int, rpad(frac[1:min(3,length(frac))], 3, '0'))
+            return Time(hour, minute, second, ms)
+        end
+    end
+    return Time(s)
 end
 
 function _parse_datetime(s::AbstractString)
