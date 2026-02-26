@@ -907,7 +907,7 @@ function key_parts(n::SyntaxNode)::Vector{String}
             push!(parts, sourcetext(child))
         elseif k == K_BASIC_STRING
             text = sourcetext(child)
-            push!(parts, unescape_basic_string(text[2:end-1]))
+            push!(parts, unescape_basic_string(text[2:prevind(text, lastindex(text))]))
         elseif k == K_LITERAL_STRING
             text = sourcetext(child)
             push!(parts, text[2:end-1])
