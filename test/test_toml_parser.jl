@@ -1078,4 +1078,3 @@ valid = 8
     # The array should have the parseable elements
     @test 1 in d["arr"] && 3 in d["arr"]
 end
-end

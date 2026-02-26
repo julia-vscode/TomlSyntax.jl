@@ -465,7 +465,7 @@ function Base.show(io::IO, n::GreenNode)
     if is_leaf(n)
         print(io, "GreenNode(", n.kind, ", span=", n.span, ")")
     else
-        print(io, "GreenNode(", n.kind, ", span=", n.span, ", ", Base.length(n.children), " children)")
+        print(io, "GreenNode(", n.kind, ", span=", n.span, ", ", length(n.children), " children)")
     end
 end
 
