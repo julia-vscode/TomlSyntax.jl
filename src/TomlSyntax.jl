@@ -80,7 +80,7 @@ is_string(k::TOMLKind) = k in (K_BASIC_STRING, K_LITERAL_STRING,
                                 K_ML_BASIC_STRING, K_ML_LITERAL_STRING)
 
 """True if kind can appear as part of a key."""
-is_key_kind(k::TOMLKind) = k == K_BARE_KEY || k == K_BASIC_STRING || k == K_LITERAL_STRING
+is_key_kind(k::TOMLKind) = k == K_BARE_KEY || k == K_BASIC_STRING || k == K_LITERAL_STRING || k == K_INTEGER
 
 # ══════════════════════════════════════════════════════════════════════════════
 # §2  RawToken — the output of the Tokenizer
@@ -838,17 +838,17 @@ function node_value(n::SyntaxNode)
     text = sourcetext(n)
 
     if k == K_BASIC_STRING
-        return unescape_basic_string(text[2:end-1])
+        return unescape_basic_string(text[2:prevind(text, lastindex(text))])
     elseif k == K_LITERAL_STRING
-        return text[2:end-1]
+        return text[2:prevind(text, lastindex(text))]
     elseif k == K_ML_BASIC_STRING
-        s = text[4:end-3]
+        s = text[4:prevind(text, lastindex(text), 3)]
         # Strip leading newline per TOML spec
         if startswith(s, "\n"); s = s[2:end]
         elseif startswith(s, "\r\n"); s = s[3:end]; end
         return unescape_basic_string(s)
     elseif k == K_ML_LITERAL_STRING
-        s = text[4:end-3]
+        s = text[4:prevind(text, lastindex(text), 3)]
         if startswith(s, "\n"); s = s[2:end]
         elseif startswith(s, "\r\n"); s = s[3:end]; end
         return s
@@ -910,7 +910,7 @@ function key_parts(n::SyntaxNode)::Vector{String}
             push!(parts, unescape_basic_string(text[2:prevind(text, lastindex(text))]))
         elseif k == K_LITERAL_STRING
             text = sourcetext(child)
-            push!(parts, text[2:end-1])
+            push!(parts, text[2:prevind(text, lastindex(text))])
         elseif k == K_KEY
             # Nested K_KEY (shouldn't normally happen but handle gracefully)
             append!(parts, key_parts(child))
